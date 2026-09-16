@@ -123,6 +123,14 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// Flush 透传到底层 ResponseWriter，实现 http.Flusher，
+// 使流式（SSE）响应能够正常刷新，避免触发 "streaming not supported for client"。
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // requestLogMiddleware 记录所有进入代理的请求（API 调用与对话历史）。
 func requestLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
