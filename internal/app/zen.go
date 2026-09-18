@@ -109,6 +109,12 @@ func routeModel(id string) string {
 	id = strings.TrimSpace(id)
 	initZenModels()
 	cfg := getZenConfig()
+	// codex 上游路由优先于 zen/cline 解析: zen 动态同步的模型表可能包含
+	// gpt-5 等同名付费条目, 若不先判断会误返回 reject
+	// 仅在 Codex 上游启用时生效, 未启用时继续走 zen/cline 原有解析
+	if codexHasModel(id) && getCodexConfig().Enabled {
+		return "codex"
+	}
 	if zm, ok := resolveZenModel(id); ok {
 		if isZenFreeModel(zm) {
 			// 与 cline 模型表冲突时(几乎不可能)走 cline

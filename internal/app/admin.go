@@ -81,6 +81,15 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/zen/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
+	// codex 上游管理
+	mux.HandleFunc("/admin/api/codex/config", corsHandler(handleCodexConfig))
+	mux.HandleFunc("/admin/api/codex/config/update", corsHandler(handleCodexConfigUpdate))
+	mux.HandleFunc("/admin/api/codex/accounts", corsHandler(handleCodexAccounts))
+	mux.HandleFunc("/admin/api/codex/accounts/add", corsHandler(handleCodexAccountAdd))
+	mux.HandleFunc("/admin/api/codex/accounts/update", corsHandler(handleCodexAccountUpdate))
+	mux.HandleFunc("/admin/api/codex/accounts/delete", corsHandler(handleCodexAccountDelete))
+	mux.HandleFunc("/admin/api/codex/accounts/refresh", corsHandler(handleCodexAccountRefresh))
+	mux.HandleFunc("/admin/api/codex/models/fetch", corsHandler(handleCodexModelsFetch))
 }
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {

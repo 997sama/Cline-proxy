@@ -214,6 +214,10 @@ func StartProxy(host string, port int) error {
 		if route := routeModel(model); route == "zen" {
 			handleZenChat(w, r, params)
 			return
+		} else if route == "codex" {
+			// codex 上游路由: 伪装为 Codex 桌面版客户端
+			handleCodexChat(w, params, isStream)
+			return
 		} else if route == "reject" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{
 				"error": map[string]string{"message": fmt.Sprintf("model %q is a paid zen model; only free zen models are proxied", model), "type": "invalid_request_error"},
@@ -1386,6 +1390,8 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	log.Printf("  anthropic: model=%s stream=%v msgs=%d", req.Model, req.Stream, len(req.Messages))
 
 	// zen 免费模型路由
+	// 注: Anthropic 入口不路由 codex (codex 仅支持 Responses 协议,
+	// 直接转发会返回错误的 chat 格式), gpt-5 系列回落 cline 原有逻辑
 	if route := routeModel(req.Model); route == "zen" {
 		handleZenAnthropic(w, r, req, openAIReq, toolSchemas)
 		return

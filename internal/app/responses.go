@@ -496,6 +496,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// codex 上游: Responses API 格式直接透传
+	if route == "codex" {
+		handleCodexResponses(w, params, isStream)
+		return
+	}
+
 	// cline 上游
 	stream := isStream
 	if !isStream && modelNeedsStream(normalizeRequestModel(chatModel)) {
