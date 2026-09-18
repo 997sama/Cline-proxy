@@ -204,6 +204,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 <div class="nav-item" data-tab="settings"><span class="nav-ico">⚙️</span> 设置</div>
 <div class="nav-item" data-tab="logs"><span class="nav-ico">📜</span> 请求日志</div>
 <div class="nav-item" data-tab="opencode"><span class="nav-ico">🌐</span> opencode 免费模型</div>
+<div class="nav-item" data-tab="clinepass"><span class="nav-ico">🧭</span> ClinePass Provider</div>
 <div class="nav-item" data-tab="codex"><span class="nav-ico">🚀</span> Codex 上游</div>
 <div class="sidebar-footer">
   <div>管理面板: <a href="/admin/">/admin/</a></div>
@@ -425,10 +426,10 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
     <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>时间</th><th>来源</th><th>方法</th><th>路径</th><th>模型</th><th>路由</th><th>状态</th><th>耗时</th></tr>
+        <tr><th>时间</th><th>来源</th><th>方法</th><th>路径</th><th>模型</th><th>路由</th><th>Upstream</th><th>Pipeline</th><th>Mode</th><th>Actual Provider</th><th>状态</th><th>耗时</th></tr>
       </thead>
       <tbody id="logsTableBody">
-        <tr><td colspan="8" class="empty">加载中...</td></tr>
+        <tr><td colspan="12" class="empty">加载中...</td></tr>
       </tbody>
     </table>
     </div>
@@ -521,6 +522,56 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
   <div class="section-body">
     <div class="table-wrap"><div id="ocStatsBox"></div></div>
     <div id="ocModelStatsBox" style="margin-top:14px"></div>
+  </div>
+</div>
+</div>
+
+<div id="tab-clinepass" class="tab-panel" style="display:none">
+<h2>🧭 ClinePass Provider Routing</h2>
+<div class="hint" style="margin:-8px 0 16px">ClinePass API Key、Provider 策略和 Cline OAuth/Codex 账号完全独立。默认由服务器策略决定 routing，客户端字段不会覆盖服务器配置。</div>
+
+<div class="section">
+  <div class="section-title">⚙️ ClinePass 配置</div>
+  <div class="section-body">
+    <div class="form-row">
+      <div class="field"><label>启用 ClinePass</label><select id="cpEnabled"><option value="true">开启</option><option value="false">关闭</option></select></div>
+      <div class="field"><label>账号模式</label><select id="cpAccountMode"><option value="single">single</option><option value="round_robin">round_robin</option></select></div>
+      <div class="field"><label>允许客户端覆盖 Provider</label><select id="cpAllowOverride"><option value="false">关闭（推荐）</option><option value="true">开启</option></select></div>
+    </div>
+    <div class="form-row"><div class="field"><label>Chat Completions Endpoint</label><input id="cpBaseURL" type="text" placeholder="https://api.cline.bot/api/v1/chat/completions"></div></div>
+    <div class="form-actions"><button class="btn btn-primary" onclick="saveClinePassConfig()">💾 保存配置</button></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">🔑 API Key 管理</div>
+  <div class="section-body">
+    <div class="form-row">
+      <div class="field"><label>名称</label><input id="cpAccountName" placeholder="deepseek-main"></div>
+      <div class="field"><label>API Key</label><input id="cpAccountKey" type="password" placeholder="sk-..."></div>
+      <div class="field"><label>状态</label><select id="cpAccountEnabled"><option value="true">启用</option><option value="false">停用</option></select></div>
+    </div>
+    <div class="form-actions"><button class="btn btn-primary" onclick="addClinePassAccount()">➕ 添加账号</button><button class="btn" onclick="loadClinePassAccounts()">🔄 刷新</button></div>
+    <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>#</th><th>名称</th><th>API Key（脱敏）</th><th>状态</th><th>用量</th><th>最后使用</th><th>操作</th></tr></thead><tbody id="cpAccountsBody"><tr><td colspan="7" class="empty">加载中...</td></tr></tbody></table></div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">🧩 模型 Provider 策略</div>
+  <div class="section-body">
+    <div class="form-row">
+      <div class="field"><label>模型 ID</label><input id="cpModel" placeholder="cline-pass/deepseek-v4.1-flash"></div>
+      <div class="field"><label>Pipeline</label><select id="cpPipeline"><option value="auto">auto</option><option value="planner">planner</option><option value="direct">direct</option></select></div>
+      <div class="field"><label>Routing Mode</label><select id="cpMode"><option value="auto">auto</option><option value="strict">strict</option><option value="preferred">preferred</option></select></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label>Providers（逗号分隔，按优先级）</label><input id="cpProviders" placeholder="deepseek,novita,fireworks"></div>
+      <div class="field"><label>Excluded（逗号分隔）</label><input id="cpExclude" placeholder="provider-to-skip"></div>
+      <div class="field"><label>Sort</label><select id="cpSort"><option value="none">none</option><option value="cost">cost</option><option value="ttft">ttft</option><option value="tps">tps</option></select></div>
+    </div>
+    <div class="form-actions"><button class="btn btn-primary" onclick="saveClinePassPolicy()">💾 保存策略</button><button class="btn" onclick="probeClinePassModel()">🔎 探测 Provider</button><button class="btn" onclick="validateClinePassModel()">✅ 校验 Provider</button></div>
+    <div id="cpProbeResult" class="hint"></div>
+    <div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Model</th><th>Pipeline</th><th>Mode</th><th>Providers</th><th>Excluded</th><th>Actual Provider</th><th>Provider Status</th><th>操作</th></tr></thead><tbody id="cpModelsBody"><tr><td colspan="8" class="empty">加载中...</td></tr></tbody></table></div>
   </div>
 </div>
 </div>
@@ -720,6 +771,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
     if (el.dataset.tab === 'logs') loadLogs();
     if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
+    if (el.dataset.tab === 'clinepass') { loadClinePassConfig(); loadClinePassAccounts(); loadClinePassModels(); }
     if (el.dataset.tab === 'codex') { loadCodexConfig(); loadCodexAccounts(); }
   });
 });
@@ -735,6 +787,7 @@ function switchTab(name) {
   if (name === 'settings') { loadKeys(); loadModels(); }
   if (name === 'logs') loadLogs();
   if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
+  if (name === 'clinepass') { loadClinePassConfig(); loadClinePassAccounts(); loadClinePassModels(); }
   if (name === 'codex') { loadCodexConfig(); loadCodexAccounts(); }
 }
 
@@ -1027,7 +1080,7 @@ function copyText(t) {
 }
 
 // ========== 请求日志 ==========
-const ROUTE_LABEL = { zen: 'opencode', cline: 'cline 池', admin: '管理', meta: '元信息', other: '其他' };
+const ROUTE_LABEL = { zen: 'opencode', cline: 'cline 池', clinepass: 'ClinePass', admin: '管理', meta: '元信息', other: '其他' };
 const STATUS_CLASS = s => s >= 500 ? 'color:var(--danger)' : (s >= 400 ? 'color:var(--amber)' : 'color:var(--accent2)');
 
 async function loadLogs() {
@@ -1035,7 +1088,7 @@ async function loadLogs() {
     const d = await api('GET', '/logs');
     const logs = d.data.logs || [];
     const tbody = _('logsTableBody');
-    if (!logs.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无请求记录</td></tr>'; return; }
+    if (!logs.length) { tbody.innerHTML = '<tr><td colspan="12" class="empty">暂无请求记录</td></tr>'; return; }
     tbody.innerHTML = logs.map(l => {
       const t = l.time ? new Date(l.time).toLocaleString('zh-CN') : '-';
       const route = ROUTE_LABEL[l.route] || l.route || '-';
@@ -1047,11 +1100,15 @@ async function loadLogs() {
         '<td class="mono" style="font-size:11px">' + esc(l.path || '-') + '</td>' +
         '<td class="mono" style="font-size:12px">' + esc(l.model || '-') + '</td>' +
         '<td><span class="model-tag">' + esc(route) + '</span></td>' +
+        '<td>' + esc(l.upstream || '-') + '</td>' +
+        '<td>' + esc(l.pipeline || '-') + '</td>' +
+        '<td>' + esc(l.routingMode || '-') + '</td>' +
+        '<td>' + esc(l.actualProvider || '-') + '</td>' +
         '<td style="font-weight:600;color:' + STATUS_CLASS(st) + '">' + st + '</td>' +
-        '<td class="mono" style="font-size:11px">' + (l.durationMs != null ? l.durationMs + ' ms' : '-') + '</td>' +
+        '<td class="mono" style="font-size:11px">' + (l.duration_ms != null ? l.duration_ms + ' ms' : '-') + '</td>' +
       '</tr>';
     }).join('');
-  } catch (e) { tbody.innerHTML = '<tr><td colspan="8" class="empty">加载失败</td></tr>'; }
+  } catch (e) { tbody.innerHTML = '<tr><td colspan="12" class="empty">加载失败</td></tr>'; }
 }
 
 // ========== 导出账号 ==========
@@ -1301,6 +1358,126 @@ async function loadOcStats() {
   } catch (e) { /* ignore */ }
 }
 
+// ========== ClinePass Provider 管理 ==========
+async function loadClinePassConfig() {
+  try {
+    const d = await api('GET', '/clinepass/config');
+    const c = d.data || {};
+    _('cpEnabled').value = String(c.enabled);
+    _('cpAccountMode').value = c.accountMode || 'round_robin';
+    _('cpAllowOverride').value = String(c.allowClientProviderOverride);
+    _('cpBaseURL').value = c.baseURL || '';
+  } catch (e) { /* ignore */ }
+}
+async function saveClinePassConfig() {
+  try {
+    await api('POST', '/clinepass/config/update', {
+      enabled: _('cpEnabled').value === 'true',
+      accountMode: _('cpAccountMode').value,
+      allowClientProviderOverride: _('cpAllowOverride').value === 'true',
+      baseURL: _('cpBaseURL').value.trim()
+    });
+    toast('ClinePass 配置已保存', 'success');
+  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+}
+async function loadClinePassAccounts() {
+  try {
+    const d = await api('GET', '/clinepass/accounts');
+    const list = d.data || [];
+    const tb = _('cpAccountsBody');
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无 ClinePass API Key</td></tr>'; return; }
+    tb.innerHTML = list.map(a => '<tr>' +
+      '<td>' + a.index + '</td><td>' + esc(a.name) + '</td><td class="mono">' + esc(a.apiKey) + '</td>' +
+      '<td><span class="badge ' + (a.enabled ? 'badge-ok' : 'badge-err') + '">' + (a.enabled ? '启用' : '停用') + '</span></td>' +
+      '<td>' + (a.usageCount || 0) + '</td><td>' + (a.lastUsed ? new Date(a.lastUsed).toLocaleString('zh-CN') : '-') + '</td>' +
+      '<td><button class="btn-sm" onclick="testClinePassAccount(' + a.index + ')">测试</button> <button class="btn-sm" onclick="toggleClinePassAccount(' + a.index + ',' + (!a.enabled) + ')">' + (a.enabled ? '停用' : '启用') + '</button> <button class="btn-sm btn-danger" onclick="deleteClinePassAccount(' + a.index + ')">删除</button></td>' +
+      '</tr>').join('');
+  } catch (e) { _('cpAccountsBody').innerHTML = '<tr><td colspan="7" class="empty">加载失败</td></tr>'; }
+}
+async function addClinePassAccount() {
+  const name = _('cpAccountName').value.trim(), apiKey = _('cpAccountKey').value.trim();
+  if (!name || !apiKey) { toast('名称和 API Key 不能为空', 'error'); return; }
+  try {
+    await api('POST', '/clinepass/accounts/add', {name, apiKey, enabled: _('cpAccountEnabled').value === 'true'});
+    _('cpAccountName').value = ''; _('cpAccountKey').value = '';
+    toast('ClinePass 账号已添加', 'success'); loadClinePassAccounts();
+  } catch (e) { toast('添加失败: ' + e.message, 'error'); }
+}
+async function toggleClinePassAccount(index, enabled) {
+  try { await api('POST', '/clinepass/accounts/update', {index, enabled}); loadClinePassAccounts(); }
+  catch (e) { toast('更新失败: ' + e.message, 'error'); }
+}
+async function deleteClinePassAccount(index) {
+  if (!confirm('确认删除此 ClinePass API Key？')) return;
+  try { await api('POST', '/clinepass/accounts/delete', {index}); toast('账号已删除', 'success'); loadClinePassAccounts(); }
+  catch (e) { toast('删除失败: ' + e.message, 'error'); }
+}
+async function testClinePassAccount(index) {
+  try { const d = await api('POST', '/clinepass/accounts/test', {index, model: _('cpModel').value.trim()}); toast('测试结果: ' + (d.data.status || 'ok'), d.data.status === 'ok' ? 'success' : 'warning'); }
+  catch (e) { toast('测试失败: ' + e.message, 'error'); }
+}
+function splitProviders(value) { return value.split(',').map(s => s.trim()).filter(Boolean); }
+function setClinePassPolicyForm(model, policy) {
+  _('cpModel').value = model || '';
+  _('cpPipeline').value = policy.pipeline || 'auto';
+  _('cpMode').value = policy.mode || 'auto';
+  _('cpProviders').value = (policy.providers || []).join(',');
+  _('cpExclude').value = (policy.exclude || []).join(',');
+  _('cpSort').value = policy.sort || 'none';
+}
+let clinePassModelCache = {};
+function selectClinePassModel(model) {
+  const item = clinePassModelCache[model];
+  if (item) setClinePassPolicyForm(model, {pipeline:item.pipeline, mode:item.mode, providers:item.providers||[], exclude:item.exclude||[], sort:item.sort||'none'});
+}
+async function loadClinePassModels() {
+  try {
+    const d = await api('GET', '/clinepass/models');
+    const list = (d.data && d.data.models) || [];
+    const tb = _('cpModelsBody');
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">暂无模型策略。可先填写模型 ID 并保存。</td></tr>'; return; }
+    clinePassModelCache = {};
+    list.forEach(m => { clinePassModelCache[m.id] = m; });
+    tb.innerHTML = list.map(m => {
+      const statuses = m.providerStatus || {};
+      const statusText = Object.keys(statuses).map(k => esc(k) + ':' + esc(statuses[k])).join(', ') || '-';
+      const modelArg = String(m.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      return '<tr>' +
+        '<td class="mono">' + esc(m.id) + '</td><td>' + esc(m.pipeline || 'unknown') + '</td><td>' + esc(m.mode || 'auto') + '</td>' +
+        '<td>' + (m.providers || []).map(p => '<span class="model-tag pass">' + esc(p) + '</span>').join('') + '</td>' +
+        '<td>' + (m.exclude || []).map(p => '<span class="model-tag">' + esc(p) + '</span>').join('') + '</td>' +
+        '<td>' + esc(m.actualProvider || '-') + '</td><td class="mono">' + statusText + '</td><td><button class="btn-sm" onclick="selectClinePassModel(\'' + modelArg + '\')">编辑</button></td></tr>';
+    }).join('');
+  } catch (e) { _('cpModelsBody').innerHTML = '<tr><td colspan="8" class="empty">加载失败</td></tr>'; }
+}
+async function saveClinePassPolicy() {
+  const model = _('cpModel').value.trim();
+  if (!model) { toast('请输入模型 ID', 'error'); return; }
+  const policy = {pipeline:_('cpPipeline').value, mode:_('cpMode').value, providers:splitProviders(_('cpProviders').value), exclude:splitProviders(_('cpExclude').value), sort:_('cpSort').value};
+  try { await api('POST', '/clinepass/models/policy', {model, policy}); toast('模型策略已保存', 'success'); loadClinePassModels(); }
+  catch (e) { toast('保存策略失败: ' + e.message, 'error'); }
+}
+async function probeClinePassModel() {
+  const model = _('cpModel').value.trim();
+  if (!model) { toast('请输入模型 ID', 'error'); return; }
+  _('cpProbeResult').textContent = '探测中...';
+  try {
+    const d = await api('POST', '/clinepass/models/probe', {model, pipeline:_('cpPipeline').value});
+    const x = d.data || {}; _('cpProviders').value = (x.providers || []).join(',');
+    _('cpPipeline').value = x.pipeline || _('cpPipeline').value;
+    _('cpProbeResult').textContent = '发现 Provider: ' + ((x.providers || []).join(', ') || 'unknown') + ' · Pipeline: ' + (x.pipeline || 'unknown');
+    loadClinePassModels();
+  } catch (e) { _('cpProbeResult').textContent = '探测失败: ' + e.message; }
+}
+async function validateClinePassModel() {
+  const model = _('cpModel').value.trim();
+  if (!model) { toast('请输入模型 ID', 'error'); return; }
+  try {
+    const d = await api('POST', '/clinepass/models/validate', {model, providers:splitProviders(_('cpProviders').value)});
+    const statuses = d.data.statuses || {}; _('cpProbeResult').textContent = Object.keys(statuses).map(k => k + ': ' + statuses[k]).join(' · '); loadClinePassModels();
+  } catch (e) { toast('校验失败: ' + e.message, 'error'); }
+}
+
 // ========== Codex 上游管理 ==========
 function loadCodexConfig() {
   fetch(API + '/codex/config').then(r => r.json()).then(r => {
@@ -1503,11 +1680,15 @@ loadAccounts();
 loadKeys();
 loadModels();
 loadConfig();
+loadClinePassConfig();
+loadClinePassAccounts();
+loadClinePassModels();
 loadCodexConfig();
 loadCodexAccounts();
 setInterval(() => { loadStats(); }, 10000);
 setInterval(() => { loadOcStats(); }, 15000);
 setInterval(() => { if (_('tab-logs').style.display !== 'none') loadLogs(); }, 8000);
+setInterval(() => { if (_('tab-clinepass').style.display !== 'none') loadClinePassModels(); }, 15000);
 setInterval(() => { if (_('tab-codex').style.display !== 'none') loadCodexAccounts(); }, 15000);
 </script>
 </body>
