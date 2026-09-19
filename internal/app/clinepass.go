@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -275,17 +276,30 @@ func pickClinePassAccount() (ClinePassAccount, bool) {
 		return ClinePassAccount{}, false
 	}
 	idx := -1
+	indexChanged := false
 	if cfg.AccountMode == "single" {
-		for i := range cfg.Accounts {
-			if cfg.Accounts[i].Enabled && cfg.Accounts[i].APIKey != "" {
-				idx = i
-				break
+		if cfg.CurrentIdx >= 0 && cfg.CurrentIdx < len(cfg.Accounts) {
+			selected := cfg.Accounts[cfg.CurrentIdx]
+			if selected.Enabled && strings.TrimSpace(selected.APIKey) != "" {
+				idx = cfg.CurrentIdx
+			}
+		}
+		if idx < 0 {
+			for i := range cfg.Accounts {
+				if cfg.Accounts[i].Enabled && strings.TrimSpace(cfg.Accounts[i].APIKey) != "" {
+					idx = i
+					if cfg.CurrentIdx != i {
+						cfg.CurrentIdx = i
+						indexChanged = true
+					}
+					break
+				}
 			}
 		}
 	} else {
 		for i := 0; i < len(cfg.Accounts); i++ {
 			candidate := (cfg.CurrentIdx + i) % len(cfg.Accounts)
-			if cfg.Accounts[candidate].Enabled && cfg.Accounts[candidate].APIKey != "" {
+			if cfg.Accounts[candidate].Enabled && strings.TrimSpace(cfg.Accounts[candidate].APIKey) != "" {
 				idx = candidate
 				cfg.CurrentIdx = (candidate + 1) % len(cfg.Accounts)
 				break
@@ -300,7 +314,7 @@ func pickClinePassAccount() (ClinePassAccount, bool) {
 	clinePassConfigMu.Unlock()
 	// Persisting the index is intentionally outside the config lock and never
 	// surrounds network I/O.
-	if cfg.AccountMode != "single" {
+	if cfg.AccountMode != "single" || indexChanged {
 		saveClinePassConfig()
 	}
 	return account, true
@@ -353,6 +367,24 @@ func buildClinePassBody(params map[string]any, stream bool) map[string]any {
 
 func copyStringSlice(in []string) []string { return append([]string(nil), in...) }
 
+// effectiveClinePassProviders is the single source of truth for the providers
+// that a server policy may use. Every locally generated attempt must start from
+// this list so an excluded provider cannot re-enter a fallback request.
+func effectiveClinePassProviders(policy ClinePassModelPolicy) []string {
+	policy = normalizeClinePassPolicy(policy)
+	excluded := make(map[string]bool, len(policy.Exclude))
+	for _, provider := range policy.Exclude {
+		excluded[provider] = true
+	}
+	providers := make([]string, 0, len(policy.Providers))
+	for _, provider := range policy.Providers {
+		if !excluded[provider] {
+			providers = append(providers, provider)
+		}
+	}
+	return providers
+}
+
 func knownClinePassProviders(model string) []string {
 	clinePassMetadataMu.RLock()
 	defer clinePassMetadataMu.RUnlock()
@@ -372,18 +404,7 @@ func applyClinePassProviderPolicy(body map[string]any, model string, policy Clin
 	if pipeline == "auto" {
 		pipeline = "planner"
 	}
-	providers := copyStringSlice(policy.Providers)
-	excluded := make(map[string]bool)
-	for _, provider := range policy.Exclude {
-		excluded[provider] = true
-	}
-	filtered := providers[:0]
-	for _, provider := range providers {
-		if !excluded[provider] {
-			filtered = append(filtered, provider)
-		}
-	}
-	providers = filtered
+	providers := effectiveClinePassProviders(policy)
 
 	mode := policy.Mode
 	if mode == "auto" {
@@ -395,13 +416,9 @@ func applyClinePassProviderPolicy(body map[string]any, model string, policy Clin
 		}
 		if len(providers) == 0 {
 			providers = knownClinePassProviders(model)
-			filtered = providers[:0]
-			for _, provider := range providers {
-				if !excluded[provider] {
-					filtered = append(filtered, provider)
-				}
-			}
-			providers = filtered
+			knownPolicy := policy
+			knownPolicy.Providers = providers
+			providers = effectiveClinePassProviders(knownPolicy)
 		}
 		if len(providers) == 0 {
 			return body
@@ -413,10 +430,13 @@ func applyClinePassProviderPolicy(body map[string]any, model string, policy Clin
 	}
 	if mode == "preferred" {
 		if pipeline == "direct" {
-			body["provider"] = map[string]any{"order": providers}
+			body["provider"] = map[string]any{"order": providers, "only": providers}
+			if policy.Sort != "none" {
+				body["provider"].(map[string]any)["sort"] = clinePassDirectSort(policy.Sort)
+			}
 			return body
 		}
-		gateway := map[string]any{"order": providers}
+		gateway := map[string]any{"order": providers, "only": providers}
 		if policy.Sort != "none" {
 			gateway["sort"] = policy.Sort
 		}
@@ -424,7 +444,11 @@ func applyClinePassProviderPolicy(body map[string]any, model string, policy Clin
 		return body
 	}
 	if pipeline == "direct" {
-		body["provider"] = map[string]any{"only": providers}
+		provider := map[string]any{"only": providers}
+		if policy.Sort != "none" {
+			provider["sort"] = clinePassDirectSort(policy.Sort)
+		}
+		body["provider"] = provider
 	} else {
 		gateway := map[string]any{"only": providers}
 		if policy.Sort != "none" {
@@ -433,6 +457,19 @@ func applyClinePassProviderPolicy(body map[string]any, model string, policy Clin
 		body["providerOptions"] = map[string]any{"gateway": gateway}
 	}
 	return body
+}
+
+func clinePassDirectSort(sortName string) string {
+	switch sortName {
+	case "cost":
+		return "price"
+	case "ttft":
+		return "latency"
+	case "tps":
+		return "throughput"
+	default:
+		return ""
+	}
 }
 
 func serverPolicyControlsRouting(policy ClinePassModelPolicy) bool {
@@ -459,27 +496,63 @@ func resolveClinePassPipeline(model string, policy ClinePassModelPolicy) string 
 
 func requestedClinePassProviders(body map[string]any, policy ClinePassModelPolicy) []string {
 	if len(policy.Providers) > 0 {
-		return copyStringSlice(policy.Providers)
+		return effectiveClinePassProviders(policy)
 	}
 	if provider, ok := body["provider"].(map[string]any); ok {
-		if values, ok := provider["only"].([]any); ok {
-			return anyStrings(values)
+		if values, ok := provider["only"]; ok {
+			if out := stringSliceValue(values); len(out) > 0 {
+				return filterClinePassProviders(out, policy.Exclude)
+			}
 		}
-		if values, ok := provider["order"].([]any); ok {
-			return anyStrings(values)
+		if values, ok := provider["order"]; ok {
+			if out := stringSliceValue(values); len(out) > 0 {
+				return filterClinePassProviders(out, policy.Exclude)
+			}
 		}
 	}
 	if options, ok := body["providerOptions"].(map[string]any); ok {
 		if gateway, ok := options["gateway"].(map[string]any); ok {
-			if values, ok := gateway["only"].([]any); ok {
-				return anyStrings(values)
+			if values, ok := gateway["only"]; ok {
+				if out := stringSliceValue(values); len(out) > 0 {
+					return filterClinePassProviders(out, policy.Exclude)
+				}
 			}
-			if values, ok := gateway["order"].([]any); ok {
-				return anyStrings(values)
+			if values, ok := gateway["order"]; ok {
+				if out := stringSliceValue(values); len(out) > 0 {
+					return filterClinePassProviders(out, policy.Exclude)
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func filterClinePassProviders(providers, excluded []string) []string {
+	if len(excluded) == 0 {
+		return copyStringSlice(providers)
+	}
+	excludedSet := make(map[string]bool, len(excluded))
+	for _, provider := range excluded {
+		excludedSet[provider] = true
+	}
+	out := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if !excludedSet[provider] {
+			out = append(out, provider)
+		}
+	}
+	return out
+}
+
+func stringSliceValue(value any) []string {
+	switch values := value.(type) {
+	case []string:
+		return copyStringSlice(values)
+	case []any:
+		return anyStrings(values)
+	default:
+		return nil
+	}
 }
 
 func anyStrings(values []any) []string {
@@ -493,7 +566,13 @@ func anyStrings(values []any) []string {
 }
 
 func makeClinePassAttemptPolicy(policy ClinePassModelPolicy, pipeline string, mode string, providers []string) ClinePassModelPolicy {
-	return ClinePassModelPolicy{Pipeline: pipeline, Mode: mode, Providers: copyStringSlice(providers), Sort: policy.Sort}
+	return ClinePassModelPolicy{
+		Pipeline:  pipeline,
+		Mode:      mode,
+		Providers: copyStringSlice(providers),
+		Exclude:   copyStringSlice(policy.Exclude),
+		Sort:      policy.Sort,
+	}
 }
 
 func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *ClinePassRequestMeta, error) {
@@ -506,11 +585,12 @@ func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *Clin
 		return nil, nil, &clinePassUpstreamError{Status: http.StatusServiceUnavailable, Kind: "auth_error", Message: "no active clinepass API keys available"}
 	}
 	model, _ := params["model"].(string)
-	serverPolicy := clinePassPolicyForModel(model)
+	serverPolicy := normalizeClinePassPolicy(clinePassPolicyForModel(model))
 	pipeline := resolveClinePassPipeline(model, serverPolicy)
 	baseBody := buildClinePassBody(params, stream)
 	effectiveBody := baseBody
-	if !cfg.AllowClientProviderOverride || serverPolicyControlsRouting(serverPolicy) {
+	controlsRouting := serverPolicyControlsRouting(serverPolicy)
+	if !cfg.AllowClientProviderOverride || controlsRouting {
 		effectiveBody = applyClinePassProviderPolicy(effectiveBody, model, ClinePassModelPolicy{
 			Pipeline:  pipeline,
 			Mode:      serverPolicy.Mode,
@@ -519,20 +599,15 @@ func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *Clin
 			Sort:      serverPolicy.Sort,
 		})
 	}
-	requested := requestedClinePassProviders(effectiveBody, serverPolicy)
-	if len(requested) == 0 && len(serverPolicy.Exclude) > 0 {
-		requested = knownClinePassProviders(model)
-		excluded := make(map[string]bool, len(serverPolicy.Exclude))
-		for _, provider := range serverPolicy.Exclude {
-			excluded[provider] = true
-		}
-		filtered := requested[:0]
-		for _, provider := range requested {
-			if !excluded[provider] {
-				filtered = append(filtered, provider)
-			}
-		}
-		requested = filtered
+	allowedProviders := effectiveClinePassProviders(serverPolicy)
+	if len(allowedProviders) == 0 && len(serverPolicy.Exclude) > 0 {
+		knownPolicy := serverPolicy
+		knownPolicy.Providers = knownClinePassProviders(model)
+		allowedProviders = effectiveClinePassProviders(knownPolicy)
+	}
+	requested := copyStringSlice(allowedProviders)
+	if !controlsRouting {
+		requested = requestedClinePassProviders(effectiveBody, ClinePassModelPolicy{})
 	}
 	meta := &ClinePassRequestMeta{
 		Upstream:           "clinepass",
@@ -544,11 +619,25 @@ func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *Clin
 		ActualModel:        "unknown",
 	}
 
-	policies := []ClinePassModelPolicy{{Pipeline: pipeline, Mode: serverPolicy.Mode, Providers: serverPolicy.Providers, Exclude: serverPolicy.Exclude, Sort: serverPolicy.Sort}}
-	if serverPolicy.Mode == "preferred" && len(serverPolicy.Providers) > 1 {
-		for i := 1; i < len(serverPolicy.Providers); i++ {
-			policies = append(policies, makeClinePassAttemptPolicy(serverPolicy, pipeline, "strict", []string{serverPolicy.Providers[i]}))
+	if (serverPolicy.Mode == "strict" || serverPolicy.Mode == "preferred" || len(serverPolicy.Exclude) > 0) && len(allowedProviders) == 0 {
+		return nil, meta, &clinePassUpstreamError{
+			Status:   http.StatusUnprocessableEntity,
+			Kind:     "policy_error",
+			Message:  "clinepass policy has no allowed providers",
+			Attempts: meta.Attempts,
 		}
+	}
+
+	// Preferred is intentionally controlled by the proxy. Each attempt is a
+	// strict, single-provider request, so the upstream cannot add a provider
+	// outside the configured order and cannot perform a second hidden fallback.
+	policies := []ClinePassModelPolicy{}
+	if serverPolicy.Mode == "preferred" && len(allowedProviders) > 0 {
+		for _, provider := range allowedProviders {
+			policies = append(policies, makeClinePassAttemptPolicy(serverPolicy, pipeline, "strict", []string{provider}))
+		}
+	} else {
+		policies = append(policies, makeClinePassAttemptPolicy(serverPolicy, pipeline, serverPolicy.Mode, allowedProviders))
 	}
 
 	for i, policy := range policies {
@@ -573,7 +662,7 @@ func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *Clin
 		}
 
 		attemptProvider := "auto"
-		if len(policy.Providers) > 0 {
+		if policy.Mode != "auto" && len(policy.Providers) > 0 {
 			attemptProvider = policy.Providers[0]
 		}
 		resp, err := kit.HTTPClient.Do(req)
@@ -604,6 +693,34 @@ func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *Clin
 					return nil, meta, &clinePassUpstreamError{Status: http.StatusBadGateway, Kind: kind, Message: sanitizeClinePassError(string(bodyBytes), account.APIKey), Attempts: meta.Attempts}
 				}
 				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			} else {
+				prefix, errorBody, remainder, preflightErr := preflightClinePassStream(resp)
+				if preflightErr != nil {
+					_ = resp.Body.Close()
+					meta.Attempts = append(meta.Attempts, ClinePassAttempt{Provider: attemptProvider, Status: resp.StatusCode, Kind: "network_error"})
+					if i+1 < len(policies) {
+						continue
+					}
+					return nil, meta, &clinePassUpstreamError{Status: http.StatusBadGateway, Kind: "network_error", Message: "clinepass response read failed", Attempts: meta.Attempts}
+				}
+				if errorBody != nil {
+					_ = resp.Body.Close()
+					kind := classifyClinePassHTTPError(http.StatusBadGateway, string(errorBody))
+					meta.Attempts = append(meta.Attempts, ClinePassAttempt{Provider: attemptProvider, Status: resp.StatusCode, Kind: kind})
+					if i+1 < len(policies) {
+						continue
+					}
+					return nil, meta, &clinePassUpstreamError{
+						Status:   http.StatusBadGateway,
+						Kind:     kind,
+						Message:  sanitizeClinePassError(string(errorBody), account.APIKey),
+						Attempts: meta.Attempts,
+					}
+				}
+				// The preflight has consumed bytes from the upstream. Put the
+				// first event (and any buffered bytes) back in front of the
+				// original stream so the client sees the response unchanged.
+				resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), remainder))
 			}
 			meta.Attempts = append(meta.Attempts, ClinePassAttempt{Provider: attemptProvider, Status: resp.StatusCode, Kind: "ok"})
 			recordClinePassUse(account)
@@ -624,6 +741,68 @@ func callClinePassAPI(params map[string]any, stream bool) (*http.Response, *Clin
 		}
 	}
 	return nil, meta, &clinePassUpstreamError{Status: http.StatusBadGateway, Kind: "upstream_error", Message: "clinepass upstream failed", Attempts: meta.Attempts}
+}
+
+// preflightClinePassStream checks a successful streaming response before the
+// proxy has written anything to its client. A 2xx JSON error and an SSE error
+// event are still upstream failures and may be retried by preferred mode.
+// The returned remainder is the buffered reader itself, preserving bytes read
+// ahead by bufio.Reader.
+func preflightClinePassStream(resp *http.Response) (prefix, errorBody []byte, remainder io.Reader, err error) {
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "application/json") {
+		body, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, nil, nil, readErr
+		}
+		if clinePassResponseHasError(body) {
+			return nil, body, nil, nil
+		}
+		return body, nil, strings.NewReader(""), nil
+	}
+	if contentType != "" && !strings.Contains(contentType, "text/event-stream") {
+		return nil, nil, resp.Body, nil
+	}
+
+	prefix, data, reader, readErr := readClinePassSSEEvent(resp.Body)
+	if readErr != nil {
+		return prefix, nil, reader, readErr
+	}
+	if clinePassResponseHasError(data) {
+		return prefix, data, reader, nil
+	}
+	return prefix, nil, reader, nil
+}
+
+func readClinePassSSEEvent(body io.Reader) ([]byte, []byte, io.Reader, error) {
+	reader := bufio.NewReader(body)
+	var raw bytes.Buffer
+	var dataLines []string
+	hasData := false
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		raw.Write(line)
+		text := strings.TrimSuffix(strings.TrimSuffix(string(line), "\n"), "\r")
+		if text == "" {
+			if hasData {
+				return append([]byte(nil), raw.Bytes()...), []byte(strings.Join(dataLines, "\n")), reader, nil
+			}
+		} else if strings.HasPrefix(text, "data:") {
+			value := strings.TrimPrefix(text, "data:")
+			if strings.HasPrefix(value, " ") {
+				value = value[1:]
+			}
+			dataLines = append(dataLines, value)
+			hasData = true
+		}
+		if readErr != nil {
+			if readErr == io.EOF && hasData {
+				return append([]byte(nil), raw.Bytes()...), []byte(strings.Join(dataLines, "\n")), reader, nil
+			}
+			return append([]byte(nil), raw.Bytes()...), nil, reader, readErr
+		}
+	}
 }
 
 func clinePassResponseHasError(body []byte) bool {

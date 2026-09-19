@@ -13,6 +13,7 @@ type clinePassAccountView struct {
 	Name       string `json:"name"`
 	APIKey     string `json:"apiKey"`
 	Enabled    bool   `json:"enabled"`
+	Current    bool   `json:"current"`
 	UsageCount int64  `json:"usageCount"`
 	LastUsed   any    `json:"lastUsed,omitempty"`
 }
@@ -39,6 +40,7 @@ func clinePassAccountViews(cfg *ClinePassConfig) []clinePassAccountView {
 			Name:       account.Name,
 			APIKey:     maskClinePassKey(account.APIKey),
 			Enabled:    account.Enabled,
+			Current:    i == cfg.CurrentIdx,
 			UsageCount: account.UsageCount,
 			LastUsed:   account.LastUsed,
 		})
@@ -56,6 +58,7 @@ func handleClinePassConfig(w http.ResponseWriter, r *http.Request) {
 		"enabled":                     cfg.Enabled,
 		"baseURL":                     cfg.BaseURL,
 		"accountMode":                 cfg.AccountMode,
+		"currentIdx":                  cfg.CurrentIdx,
 		"allowClientProviderOverride": cfg.AllowClientProviderOverride,
 		"accountCount":                len(cfg.Accounts),
 		"perModel":                    cfg.PerModel,
@@ -71,6 +74,7 @@ func handleClinePassConfigUpdate(w http.ResponseWriter, r *http.Request) {
 		Enabled                     *bool   `json:"enabled"`
 		BaseURL                     *string `json:"baseURL"`
 		AccountMode                 *string `json:"accountMode"`
+		CurrentIdx                  *int    `json:"currentIdx"`
 		AllowClientProviderOverride *bool   `json:"allowClientProviderOverride"`
 	}
 	if err := decodeAdminJSON(r, &patch); err != nil {
@@ -90,6 +94,13 @@ func handleClinePassConfigUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.AccountMode = *patch.AccountMode
+	}
+	if patch.CurrentIdx != nil {
+		if *patch.CurrentIdx < 0 || *patch.CurrentIdx >= len(cfg.Accounts) {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "currentIdx is out of range"})
+			return
+		}
+		cfg.CurrentIdx = *patch.CurrentIdx
 	}
 	if patch.AllowClientProviderOverride != nil {
 		cfg.AllowClientProviderOverride = *patch.AllowClientProviderOverride
@@ -198,6 +209,9 @@ func handleClinePassAccountDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Accounts = append(cfg.Accounts[:idx], cfg.Accounts[idx+1:]...)
+	if idx < cfg.CurrentIdx {
+		cfg.CurrentIdx--
+	}
 	if cfg.CurrentIdx >= len(cfg.Accounts) {
 		cfg.CurrentIdx = 0
 	}

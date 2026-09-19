@@ -101,7 +101,8 @@ func TestApplyClinePassProviderPolicy(t *testing.T) {
 			assert: func(t *testing.T, body map[string]any) {
 				gateway := body["providerOptions"].(map[string]any)["gateway"].(map[string]any)
 				got := gateway["order"].([]string)
-				if len(got) != 2 || got[0] != "deepseek" || got[1] != "novita" || gateway["sort"] != "cost" {
+				only := gateway["only"].([]string)
+				if len(got) != 2 || got[0] != "deepseek" || got[1] != "novita" || len(only) != 2 || only[0] != "deepseek" || only[1] != "novita" || gateway["sort"] != "cost" {
 					t.Fatalf("unexpected planner preferred: %#v", gateway)
 				}
 			},
@@ -112,7 +113,8 @@ func TestApplyClinePassProviderPolicy(t *testing.T) {
 			assert: func(t *testing.T, body map[string]any) {
 				provider := body["provider"].(map[string]any)
 				got := provider["order"].([]string)
-				if len(got) != 2 || got[0] != "deepseek" || got[1] != "novita" {
+				only := provider["only"].([]string)
+				if len(got) != 2 || got[0] != "deepseek" || got[1] != "novita" || len(only) != 2 || only[0] != "deepseek" || only[1] != "novita" {
 					t.Fatalf("unexpected direct preferred: %#v", provider)
 				}
 			},
@@ -206,14 +208,17 @@ func TestClinePassPreferredFallbackAfter429(t *testing.T) {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			order, ok := gateway["order"].([]any)
+			only, ok := gateway["only"].([]any)
 			if !ok {
-				t.Errorf("first request missing order: %#v", gateway)
+				t.Errorf("first request missing only: %#v", gateway)
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
-			if len(order) != 2 || order[0] != "deepseek" || order[1] != "novita" {
-				t.Errorf("first request did not use gateway order: %#v", gateway)
+			if len(only) != 1 || only[0] != "deepseek" {
+				t.Errorf("first request did not pin deepseek: %#v", gateway)
+			}
+			if _, ok := gateway["order"]; ok {
+				t.Errorf("proxy-controlled preferred request unexpectedly used gateway order: %#v", gateway)
 			}
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":"temporarily rate limited"}`))
@@ -257,6 +262,19 @@ func TestClinePassPreferredFallbackAfterNetworkError(t *testing.T) {
 	var calls int32
 	kit.HTTPClient = &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		call := atomic.AddInt32(&calls, 1)
+		body := decodeRequestBody(t, r)
+		provider := body["provider"].(map[string]any)
+		only := provider["only"].([]any)
+		expected := "deepseek"
+		if call == 2 {
+			expected = "novita"
+		}
+		if len(only) != 1 || only[0] != expected {
+			t.Errorf("direct preferred attempt %d used %#v, want only=%s", call, provider, expected)
+		}
+		if _, ok := provider["order"]; ok {
+			t.Errorf("direct preferred attempt %d unexpectedly used order: %#v", call, provider)
+		}
 		if call == 1 {
 			return nil, errors.New("simulated dial failure")
 		}
@@ -273,6 +291,279 @@ func TestClinePassPreferredFallbackAfterNetworkError(t *testing.T) {
 	defer resp.Body.Close()
 	if calls != 2 || len(meta.Attempts) != 2 || meta.Attempts[0].Kind != "network_error" || meta.Attempts[1].Provider != "novita" {
 		t.Fatalf("unexpected network fallback attempts: calls=%d meta=%#v", calls, meta.Attempts)
+	}
+}
+
+func TestClinePassPreferredExcludeNeverRetriesExcludedProvider(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{
+		Pipeline:  "planner",
+		Mode:      "preferred",
+		Providers: []string{"deepseek", "novita", "fireworks"},
+		Exclude:   []string{"novita"},
+	})
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		body := decodeRequestBody(t, r)
+		raw, _ := json.Marshal(body)
+		if strings.Contains(string(raw), "novita") {
+			t.Errorf("excluded provider appeared in request %d: %s", call, raw)
+		}
+		gateway := body["providerOptions"].(map[string]any)["gateway"].(map[string]any)
+		only := gateway["only"].([]any)
+		expected := "deepseek"
+		if call == 2 {
+			expected = "fireworks"
+		}
+		if len(only) != 1 || only[0] != expected {
+			t.Errorf("request %d used %v, want only=%s", call, only, expected)
+		}
+		if call == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"temporarily rate limited"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"deepseek-v4.1-flash","provider":"fireworks","choices":[]} `))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	resp, meta, err := callClinePassAPI(map[string]any{"model": "cline-pass/test", "messages": []any{}}, false)
+	if err != nil {
+		t.Fatalf("preferred exclude fallback returned error: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected two attempts, got %d", got)
+	}
+	if len(meta.RequestedProviders) != 2 || meta.RequestedProviders[0] != "deepseek" || meta.RequestedProviders[1] != "fireworks" {
+		t.Fatalf("excluded provider remained in requested providers: %#v", meta.RequestedProviders)
+	}
+	if len(meta.Attempts) != 2 || meta.Attempts[0].Provider != "deepseek" || meta.Attempts[1].Provider != "fireworks" {
+		t.Fatalf("unexpected attempts: %#v", meta.Attempts)
+	}
+}
+
+func TestClinePassDeepSeekStrictNeverFallsBack(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{
+		Pipeline:  "planner",
+		Mode:      "strict",
+		Providers: []string{"deepseek"},
+		Exclude:   []string{"novita", "fireworks"},
+	})
+	cfg.PerModel = map[string]ClinePassModelPolicy{
+		"cline-pass/deepseek-v4.1-flash": cfg.PerModel["cline-pass/test"],
+	}
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		body := decodeRequestBody(t, r)
+		options := body["providerOptions"].(map[string]any)
+		gateway := options["gateway"].(map[string]any)
+		only := gateway["only"].([]any)
+		if len(only) != 1 || only[0] != "deepseek" {
+			t.Errorf("unexpected strict provider policy: %#v", gateway)
+		}
+		if _, ok := gateway["order"]; ok {
+			t.Errorf("strict request unexpectedly contained order: %#v", gateway)
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	_, _, err := callClinePassAPI(map[string]any{"model": "cline-pass/deepseek-v4.1-flash", "messages": []any{}}, false)
+	if err == nil {
+		t.Fatal("strict request unexpectedly succeeded")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("strict request fell back after %d upstream calls", got)
+	}
+}
+
+func TestClinePassClientRoutingCannotOverrideServerPolicyAtCallLevel(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{Pipeline: "planner", Mode: "strict", Providers: []string{"deepseek"}})
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		body := decodeRequestBody(t, r)
+		gateway := body["providerOptions"].(map[string]any)["gateway"].(map[string]any)
+		only := gateway["only"].([]any)
+		if len(only) != 1 || only[0] != "deepseek" {
+			t.Errorf("client provider override reached upstream: %#v", gateway)
+		}
+		raw, _ := json.Marshal(body)
+		if strings.Contains(string(raw), "novita") {
+			t.Errorf("client provider leaked to upstream: %s", raw)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"deepseek-v4.1-flash","provider":"deepseek","choices":[]} `))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	resp, _, err := callClinePassAPI(map[string]any{
+		"model":           "cline-pass/test",
+		"providerOptions": map[string]any{"gateway": map[string]any{"only": []any{"novita"}}},
+	}, false)
+	if err != nil {
+		t.Fatalf("call-level policy test failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if calls != 1 {
+		t.Fatalf("expected one upstream request, got %d", calls)
+	}
+}
+
+func TestClinePassSingleUsesConfiguredCurrentAccount(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{Pipeline: "direct", Mode: "strict", Providers: []string{"deepseek"}})
+	cfg.AccountMode = "single"
+	cfg.CurrentIdx = 1
+	cfg.Accounts = []ClinePassAccount{
+		{Name: "first", APIKey: "sk-first", Enabled: true},
+		{Name: "selected", APIKey: "sk-selected", Enabled: true},
+		{Name: "third", APIKey: "sk-third", Enabled: true},
+	}
+	installClinePassTestState(t, cfg)
+	account, ok := pickClinePassAccount()
+	if !ok || account.Name != "selected" {
+		t.Fatalf("single mode selected %#v, want selected account", account)
+	}
+}
+
+func TestClinePassDirectSortMapping(t *testing.T) {
+	for input, expected := range map[string]string{"cost": "price", "ttft": "latency", "tps": "throughput"} {
+		body := applyClinePassProviderPolicy(map[string]any{}, "cline-pass/test", ClinePassModelPolicy{
+			Pipeline:  "direct",
+			Mode:      "preferred",
+			Providers: []string{"deepseek"},
+			Sort:      input,
+		})
+		provider := body["provider"].(map[string]any)
+		if got := provider["sort"]; got != expected {
+			t.Fatalf("direct sort %q mapped to %v, want %s", input, got, expected)
+		}
+	}
+}
+
+func TestClinePassStreamingJSONErrorPreflightFallsBack(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{Pipeline: "planner", Mode: "preferred", Providers: []string{"deepseek", "novita"}})
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"error":"provider unavailable"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	resp, meta, err := callClinePassAPI(map[string]any{"model": "cline-pass/test", "stream": true}, true)
+	if err != nil {
+		t.Fatalf("JSON streaming preflight did not fallback: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected JSON error fallback, got %d calls", got)
+	}
+	if len(meta.Attempts) != 2 || meta.Attempts[0].Provider != "deepseek" || meta.Attempts[1].Provider != "novita" {
+		t.Fatalf("unexpected JSON preflight attempts: %#v", meta.Attempts)
+	}
+}
+
+func TestClinePassStreamingSSEErrorPreflightFallsBack(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{Pipeline: "planner", Mode: "preferred", Providers: []string{"deepseek", "novita"}})
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"error\":\"rate limited\"}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	resp, meta, err := callClinePassAPI(map[string]any{"model": "cline-pass/test", "stream": true}, true)
+	if err != nil {
+		t.Fatalf("SSE error preflight did not fallback: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("expected SSE error fallback, got %d calls", got)
+	}
+	if len(meta.Attempts) != 2 || meta.Attempts[0].Kind != "rate_limit" || meta.Attempts[1].Kind != "ok" {
+		t.Fatalf("unexpected SSE preflight attempts: %#v", meta.Attempts)
+	}
+}
+
+func TestClinePassStreamingNormalFirstEventDisablesFallback(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{Pipeline: "planner", Mode: "preferred", Providers: []string{"deepseek", "novita"}})
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\ndata: {\"error\":\"late failure\"}\n\n"))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	resp, _, err := callClinePassAPI(map[string]any{"model": "cline-pass/test", "stream": true}, true)
+	if err != nil {
+		t.Fatalf("normal first SSE event was treated as failure: %v", err)
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(body), "late failure") || atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("stream retried after first event: calls=%d body=%s", calls, body)
+	}
+}
+
+func TestClinePassStreamingPreflightPreservesFirstEvent(t *testing.T) {
+	cfg := testClinePassConfig(ClinePassModelPolicy{Pipeline: "planner", Mode: "strict", Providers: []string{"deepseek"}})
+	expected := "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(expected))
+	}))
+	defer server.Close()
+	cfg.BaseURL = server.URL
+	installClinePassTestState(t, cfg)
+	kit.HTTPClient = server.Client()
+
+	resp, _, err := callClinePassAPI(map[string]any{"model": "cline-pass/test", "stream": true}, true)
+	if err != nil {
+		t.Fatalf("SSE preflight failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != expected {
+		t.Fatalf("preflight dropped or changed first event: got %q want %q", body, expected)
 	}
 }
 
@@ -389,5 +680,12 @@ func TestClinePassAdminDoesNotExposeAPIKey(t *testing.T) {
 	handleClinePassConfig(w, httptest.NewRequest(http.MethodGet, "/admin/api/clinepass/config", nil))
 	if strings.Contains(w.Body.String(), "sk-test-secret") || strings.Contains(w.Body.String(), "apiKey") {
 		t.Fatalf("admin config API exposed key material: %s", w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPost, "/admin/api/clinepass/config/update", strings.NewReader(`{"currentIdx":0}`))
+	handleClinePassConfigUpdate(w, updateReq)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"currentIdx":0`) {
+		t.Fatalf("admin current account update failed: %d %s", w.Code, w.Body.String())
 	}
 }

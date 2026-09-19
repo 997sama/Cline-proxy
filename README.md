@@ -193,11 +193,15 @@ Provider: deepseek
 
 策略语义：
 
-- `strict`：使用 `only`，DeepSeek 不可用时直接失败，不偷偷切换其他 Provider。
-- `preferred`：使用按顺序排列的 `order`；若上游在 SSE 正式开始前返回限流、网络或上游错误，代理才会尝试下一个 Provider。
-- `auto`：不主动钉 Provider，完全交给 ClinePass；配置 exclude 且已有 Provider discovery 结果时，会将已知 Provider 减去 exclude 转成白名单。
+- `strict`：仅允许配置中的 Provider（通常为一个），失败即失败，不偷偷切换其他 Provider。
+- `preferred`：只在配置的 `Providers` 范围内按顺序 fallback。代理逐个发送单 Provider 的严格请求，不允许 Gateway 扩展到列表之外。
+- `auto`：不主动钉 Provider，完全交给 ClinePass；配置 `Exclude` 且已有 Provider discovery 结果时，会将已知 Provider 减去 `Exclude` 转成白名单。
+
+`Exclude` 在请求链的任何阶段都生效：被排除的 Provider 不会出现在首轮、fallback、日志的候选列表或实际请求中。流式请求只有在客户端响应尚未开始前，才能因为明确的上游 HTTP/JSON/SSE 错误切换 Provider；一旦代理已经向客户端写入响应或 SSE 事件，绝不重新请求其他 Provider。`single` 账号模式使用后台选定的“当前单账号”，`round_robin` 才会轮询启用账号。
 
 Pipeline 为 `planner` 时写入 `providerOptions.gateway`，为 `direct` 时写入顶层 `provider`；`auto` 会从响应中的 `provider_metadata.gateway.routing` 或顶层 `provider` 识别并缓存实际 Pipeline。响应和 `/admin/` 请求日志会记录实际 Provider、实际模型以及 fallback attempts。客户端传入的 `provider` / `providerOptions` 默认会被清理，只有后台显式开启覆盖且服务器没有该模型策略时才会保留。
+
+`Sort` 统一使用 `cost`、`ttft`、`tps`；direct/OpenRouter 请求分别映射为 `price`、`latency`、`throughput`。
 
 Provider 可在后台执行 discovery 和逐个 validate，状态区分 `ok`、`limited`、`provider_invalid`、`auth_error`、`network_error`、`unknown` 等；临时限流不会被永久删除或拉黑。
 

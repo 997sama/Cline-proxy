@@ -538,7 +538,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
       <div class="field"><label>账号模式</label><select id="cpAccountMode"><option value="single">single</option><option value="round_robin">round_robin</option></select></div>
       <div class="field"><label>允许客户端覆盖 Provider</label><select id="cpAllowOverride"><option value="false">关闭（推荐）</option><option value="true">开启</option></select></div>
     </div>
-    <div class="form-row"><div class="field"><label>Chat Completions Endpoint</label><input id="cpBaseURL" type="text" placeholder="https://api.cline.bot/api/v1/chat/completions"></div></div>
+    <div class="form-row"><div class="field"><label>Chat Completions Endpoint</label><input id="cpBaseURL" type="text" placeholder="https://api.cline.bot/api/v1/chat/completions"></div><div class="field"><label>当前单账号</label><span id="cpCurrentAccount" class="hint">未选择</span></div></div>
     <div class="form-actions"><button class="btn btn-primary" onclick="saveClinePassConfig()">💾 保存配置</button></div>
   </div>
 </div>
@@ -1385,14 +1385,20 @@ async function loadClinePassAccounts() {
     const d = await api('GET', '/clinepass/accounts');
     const list = d.data || [];
     const tb = _('cpAccountsBody');
+    const current = list.find(a => a.current);
+    if (_('cpCurrentAccount')) _('cpCurrentAccount').textContent = current ? current.name : '未选择';
     if (!list.length) { tb.innerHTML = '<tr><td colspan="7" class="empty">暂无 ClinePass API Key</td></tr>'; return; }
     tb.innerHTML = list.map(a => '<tr>' +
       '<td>' + a.index + '</td><td>' + esc(a.name) + '</td><td class="mono">' + esc(a.apiKey) + '</td>' +
       '<td><span class="badge ' + (a.enabled ? 'badge-ok' : 'badge-err') + '">' + (a.enabled ? '启用' : '停用') + '</span></td>' +
       '<td>' + (a.usageCount || 0) + '</td><td>' + (a.lastUsed ? new Date(a.lastUsed).toLocaleString('zh-CN') : '-') + '</td>' +
-      '<td><button class="btn-sm" onclick="testClinePassAccount(' + a.index + ')">测试</button> <button class="btn-sm" onclick="toggleClinePassAccount(' + a.index + ',' + (!a.enabled) + ')">' + (a.enabled ? '停用' : '启用') + '</button> <button class="btn-sm btn-danger" onclick="deleteClinePassAccount(' + a.index + ')">删除</button></td>' +
+      '<td>' + (a.current ? '<span class="badge badge-ok">当前</span> ' : '') + '<button class="btn-sm" onclick="setClinePassCurrentAccount(' + a.index + ')">设为当前</button> <button class="btn-sm" onclick="testClinePassAccount(' + a.index + ')">测试</button> <button class="btn-sm" onclick="toggleClinePassAccount(' + a.index + ',' + (!a.enabled) + ')">' + (a.enabled ? '停用' : '启用') + '</button> <button class="btn-sm btn-danger" onclick="deleteClinePassAccount(' + a.index + ')">删除</button></td>' +
       '</tr>').join('');
   } catch (e) { _('cpAccountsBody').innerHTML = '<tr><td colspan="7" class="empty">加载失败</td></tr>'; }
+}
+async function setClinePassCurrentAccount(index) {
+  try { await api('POST', '/clinepass/config/update', {currentIdx:index}); toast('当前单账号已更新', 'success'); loadClinePassConfig(); loadClinePassAccounts(); }
+  catch (e) { toast('设置失败: ' + e.message, 'error'); }
 }
 async function addClinePassAccount() {
   const name = _('cpAccountName').value.trim(), apiKey = _('cpAccountKey').value.trim();
